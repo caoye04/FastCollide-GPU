@@ -8,6 +8,17 @@
 
 ## 设备情况 
 
+开发环境：VSCODE、Windows、5060ti
+
+```
+C:\Users\caoye04>nvcc --version
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2025 NVIDIA Corporation
+Built on Fri_Nov__7_19:25:04_Pacific_Standard_Time_2025
+Cuda compilation tools, release 13.1, V13.1.80
+Build cuda_13.1.r13.1/compiler.36836380_0
+```
+
 ```cmd
 C:\Users\caoye04>nvidia-smi
 Tue Jan  6 21:09:52 2026
