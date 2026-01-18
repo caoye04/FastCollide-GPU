@@ -2,8 +2,6 @@
 #include <curand_kernel.h>
 #include <stdio.h>
 
-// ==================== CUDA核函数 ====================
-
 // 初始化随机数生成器
 __global__ void initRandKernel(curandState *states, unsigned long seed, int n)
 {
@@ -14,7 +12,7 @@ __global__ void initRandKernel(curandState *states, unsigned long seed, int n)
     curand_init(seed, idx, 0, &states[idx]);
 }
 
-// 随机初始化粒子
+// 随机初始化粒子（修改：Z轴为高度）
 __global__ void initParticlesKernel(
     float3_custom *positions,
     float3_custom *velocities,
@@ -32,17 +30,17 @@ __global__ void initParticlesKernel(
 
     curandState localState = randStates[idx];
 
-    // 随机位置
+    // 随机位置（Z轴为高度）
     float x = worldMin.x + curand_uniform(&localState) * (worldMax.x - worldMin.x);
-    float y = worldMin.y + 0.3f * (worldMax.y - worldMin.y) +
-              curand_uniform(&localState) * 0.6f * (worldMax.y - worldMin.y);
-    float z = worldMin.z + curand_uniform(&localState) * (worldMax.z - worldMin.z);
+    float y = worldMin.y + curand_uniform(&localState) * (worldMax.y - worldMin.y);
+    float z = worldMin.z + 0.3f * (worldMax.z - worldMin.z) +
+              curand_uniform(&localState) * 0.6f * (worldMax.z - worldMin.z);
     positions[idx] = float3_custom(x, y, z);
 
     // 随机速度
     float vx = (curand_uniform(&localState) - 0.5f) * 5.0f;
-    float vy = curand_uniform(&localState) * 2.0f;
-    float vz = (curand_uniform(&localState) - 0.5f) * 5.0f;
+    float vy = (curand_uniform(&localState) - 0.5f) * 5.0f;
+    float vz = curand_uniform(&localState) * 2.0f; // Z方向向上的初速度
     velocities[idx] = float3_custom(vx, vy, vz);
 
     // 随机半径 (0.1 到 0.3)
@@ -50,7 +48,7 @@ __global__ void initParticlesKernel(
 
     // 质量与半径立方成正比
     float r = radii[idx];
-    masses[idx] = 4.0f / 3.0f * 3.14159f * r * r * r * 1000.0f; // 密度1000
+    masses[idx] = 4.0f / 3.0f * 3.14159f * r * r * r * 1000.0f;
 
     // 随机弹性系数 (0.5 到 0.95)
     restitutions[idx] = 0.5f + curand_uniform(&localState) * 0.45f;
@@ -88,7 +86,7 @@ __global__ void integrateKernel(
     velocities[idx] = vel;
 }
 
-// 处理边界碰撞
+// 处理边界碰撞（修改：Z轴为高度）
 __global__ void boundaryCollisionKernel(
     float3_custom *positions,
     float3_custom *velocities,
@@ -120,13 +118,11 @@ __global__ void boundaryCollisionKernel(
         vel.x = -vel.x * restitution;
     }
 
-    // Y边界（地面使用特殊弹性系数）
+    // Y边界
     if (pos.y - radius < worldMin.y)
     {
         pos.y = worldMin.y + radius;
-        vel.y = -vel.y * groundRestitution;
-        vel.x *= 0.98f; // 地面摩擦
-        vel.z *= 0.98f;
+        vel.y = -vel.y * restitution;
     }
     if (pos.y + radius > worldMax.y)
     {
@@ -134,11 +130,13 @@ __global__ void boundaryCollisionKernel(
         vel.y = -vel.y * restitution;
     }
 
-    // Z边界
+    // Z边界（修改：Z为高度，地面在Z=worldMin.z）
     if (pos.z - radius < worldMin.z)
     {
         pos.z = worldMin.z + radius;
-        vel.z = -vel.z * restitution;
+        vel.z = -vel.z * groundRestitution;
+        vel.x *= 0.98f; // 地面摩擦
+        vel.y *= 0.98f;
     }
     if (pos.z + radius > worldMax.z)
     {
@@ -167,28 +165,31 @@ PhysicsSimulator::~PhysicsSimulator()
 
 void PhysicsSimulator::initRandom(int count)
 {
-    cudaMalloc(&d_randStates, count * sizeof(curandState));
+    CUDA_CHECK(cudaMalloc(&d_randStates, count * sizeof(curandState)));
 
     int numBlocks = (count + BLOCK_SIZE - 1) / BLOCK_SIZE;
     initRandKernel<<<numBlocks, BLOCK_SIZE>>>(d_randStates, time(nullptr), count);
-    cudaDeviceSynchronize();
+    CUDA_CHECK_LAST_ERROR();
+    CUDA_CHECK(cudaDeviceSynchronize());
 }
 
 void PhysicsSimulator::initializeParticles(ParticleSystem &particles, int count)
 {
     particles.count = count;
 
-    // 分配内存
-    cudaMalloc(&particles.positions, count * sizeof(float3_custom));
-    cudaMalloc(&particles.velocities, count * sizeof(float3_custom));
-    cudaMalloc(&particles.radii, count * sizeof(float));
-    cudaMalloc(&particles.masses, count * sizeof(float));
-    cudaMalloc(&particles.restitutions, count * sizeof(float));
+    printf("Allocating particle system memory for %d particles...\n", count);
 
-    // 初始化随机数生成器
+    CUDA_CHECK(cudaMalloc(&particles.positions, count * sizeof(float3_custom)));
+    CUDA_CHECK(cudaMalloc(&particles.velocities, count * sizeof(float3_custom)));
+    CUDA_CHECK(cudaMalloc(&particles.radii, count * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&particles.masses, count * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&particles.restitutions, count * sizeof(float)));
+
+    printf("Particle memory allocated: %.2f MB\n",
+           count * (sizeof(float3_custom) * 2 + sizeof(float) * 3) / 1e6);
+
     initRandom(count);
 
-    // 初始化粒子
     int numBlocks = (count + BLOCK_SIZE - 1) / BLOCK_SIZE;
     initParticlesKernel<<<numBlocks, BLOCK_SIZE>>>(
         particles.positions,
@@ -200,9 +201,10 @@ void PhysicsSimulator::initializeParticles(ParticleSystem &particles, int count)
         count,
         params.worldMin,
         params.worldMax);
+    CUDA_CHECK_LAST_ERROR();
+    CUDA_CHECK(cudaDeviceSynchronize());
 
-    cudaDeviceSynchronize();
-    printf("Initialized %d particles\n", count);
+    printf("Initialized %d particles (Z-axis UP coordinate system)\n", count);
 }
 
 void PhysicsSimulator::integrate(ParticleSystem &particles, float dt)
@@ -217,6 +219,7 @@ void PhysicsSimulator::integrate(ParticleSystem &particles, float dt)
         params.gravity,
         dt,
         params.damping);
+    CUDA_CHECK_LAST_ERROR();
 }
 
 void PhysicsSimulator::handleBoundaryCollisions(ParticleSystem &particles)
@@ -232,4 +235,5 @@ void PhysicsSimulator::handleBoundaryCollisions(ParticleSystem &particles)
         params.worldMin,
         params.worldMax,
         params.groundRestitution);
+    CUDA_CHECK_LAST_ERROR();
 }

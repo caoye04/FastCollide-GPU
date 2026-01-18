@@ -1,3 +1,14 @@
+怎么运行？
+
+cd exe
+.\collision_sim.exe
+
+可以在1-5选项中选择
+1-3.预设模式
+4.性能测试
+5.手动设置参数模式
+
+
 # GPU加速碰撞检测系统
 
 ## 项目简介
@@ -9,11 +20,33 @@
 - Visual Studio 2019/2022
 - CMake 3.18+
 - Python 3.8+ (用于可视化)
+- 依赖：numpy matplotlib ffmpeg
 
-## 编译运行
+## 编译
 ```bash
 mkdir build
 cd build
-cmake .. -G "Visual Studio 17 2022" -A x64 -T cuda=13.1
+cmake ..
 cmake --build . --config Release
-.\Release\collision_sim.exe
+
+# 重新编译
+Remove-Item * -Recurse -Force
+cmake ..
+cmake --build . --config Release
+
+# 绘图
+```bash
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install numpy matplotlib ffmpeg
+
+cd exe
+默认格式
+.\collision_sim.exe
+性能测试
+.\collision_sim.exe --test
+选择模式
+.collision_sim.exe 2000 600 60 2 -9.8 0.999 0.6 output animation.mp4 1
+
+
+deactivate

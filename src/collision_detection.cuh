@@ -3,6 +3,33 @@
 
 #include <cuda_runtime.h>
 #include <cstdint>
+#include <stdio.h>
+#include <stdlib.h>
+
+// ==================== CUDA错误检查宏 ====================
+#define CUDA_CHECK(call)                                          \
+    do                                                            \
+    {                                                             \
+        cudaError_t err = call;                                   \
+        if (err != cudaSuccess)                                   \
+        {                                                         \
+            fprintf(stderr, "CUDA Error at %s:%d - %s\n",         \
+                    __FILE__, __LINE__, cudaGetErrorString(err)); \
+            exit(EXIT_FAILURE);                                   \
+        }                                                         \
+    } while (0)
+
+#define CUDA_CHECK_LAST_ERROR()                                   \
+    do                                                            \
+    {                                                             \
+        cudaError_t err = cudaGetLastError();                     \
+        if (err != cudaSuccess)                                   \
+        {                                                         \
+            fprintf(stderr, "CUDA Kernel Error at %s:%d - %s\n",  \
+                    __FILE__, __LINE__, cudaGetErrorString(err)); \
+            exit(EXIT_FAILURE);                                   \
+        }                                                         \
+    } while (0)
 
 // 常量定义
 constexpr int BLOCK_SIZE = 256;
@@ -108,6 +135,8 @@ private:
 
     // GPU临时缓冲区
     int *d_collisionFlags;
+    float3_custom *d_newPositions;  // 新增：临时位置缓冲区
+    float3_custom *d_newVelocities; // 新增：临时速度缓冲区
 
     // 辅助方法
     void allocateMemory();

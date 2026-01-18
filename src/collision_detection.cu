@@ -13,12 +13,10 @@ __device__ __host__ uint32_t hashPosition(const float3_custom &pos, const Spatia
     gridPos.y = (int)floorf((pos.y - grid.worldMin.y) / grid.cellSize);
     gridPos.z = (int)floorf((pos.z - grid.worldMin.z) / grid.cellSize);
 
-    // 边界检查
     gridPos.x = max(0, min(gridPos.x, grid.gridDim.x - 1));
     gridPos.y = max(0, min(gridPos.y, grid.gridDim.y - 1));
     gridPos.z = max(0, min(gridPos.z, grid.gridDim.z - 1));
 
-    // 计算哈希值
     return gridPos.x + gridPos.y * grid.gridDim.x + gridPos.z * grid.gridDim.x * grid.gridDim.y;
 }
 
@@ -34,7 +32,6 @@ __global__ void computeHashKernel(
     if (idx >= numParticles)
         return;
 
-    // 计算哈希值
     particleHashes[idx] = hashPosition(positions[idx], grid);
     particleIndices[idx] = idx;
 }
@@ -66,23 +63,23 @@ __global__ void buildGridKernel(
 
     uint32_t hash = particleHashes[idx];
 
-    // 如果是该单元的第一个粒子
     if (idx == 0 || hash != particleHashes[idx - 1])
     {
         cellStarts[hash] = idx;
     }
 
-    // 如果是该单元的最后一个粒子
     if (idx == numParticles - 1 || hash != particleHashes[idx + 1])
     {
         cellEnds[hash] = idx + 1;
     }
 }
 
-// Kernel 4: 碰撞检测和响应
+// Kernel 4: 碰撞检测和响应（修复版 - 关键修改）
 __global__ void collisionDetectionKernel(
-    float3_custom *positions,
-    float3_custom *velocities,
+    const float3_custom *positions,
+    float3_custom *newPositions,
+    const float3_custom *velocities,
+    float3_custom *newVelocities,
     const float *radii,
     const float *masses,
     const float *restitutions,
@@ -111,6 +108,9 @@ __global__ void collisionDetectionKernel(
     gridPos.y = (int)floorf((pos.y - grid.worldMin.y) / grid.cellSize);
     gridPos.z = (int)floorf((pos.z - grid.worldMin.z) / grid.cellSize);
 
+    // 累积修正量
+    float3_custom totalCorrection(0, 0, 0);
+    float3_custom velocityChange(0, 0, 0);
     int collisionCount = 0;
 
     // 遍历相邻的27个网格单元
@@ -149,8 +149,8 @@ __global__ void collisionDetectionKernel(
                 {
                     uint32_t otherIdx = particleIndices[i];
 
-                    // 避免自碰撞和重复检测
-                    if (otherIdx <= idx)
+                    // ✅ 关键修改：只避免自碰撞，不跳过任何其他粒子
+                    if (otherIdx == idx)
                         continue;
 
                     float3_custom otherPos = positions[otherIdx];
@@ -169,12 +169,9 @@ __global__ void collisionDetectionKernel(
                         // 碰撞响应
                         float3_custom normal = delta.normalize();
 
-                        // 位置修正（分离物体）
+                        // ✅ 位置修正 - 每个粒子承担一半的分离距离
                         float overlap = minDist - dist;
-                        float3_custom correction = normal * (overlap * 0.5f);
-
-                        positions[idx] = pos + correction;
-                        positions[otherIdx] = otherPos - correction;
+                        totalCorrection = totalCorrection + normal * (overlap * 0.5f);
 
                         // 速度修正（弹性碰撞）
                         float3_custom otherVel = velocities[otherIdx];
@@ -184,14 +181,11 @@ __global__ void collisionDetectionKernel(
                         float relativeVel = (vel - otherVel).dot(normal);
 
                         if (relativeVel < 0)
-                        {                                                 // 只处理接近的碰撞
-                            float e = min(restitution, otherRestitution); // 取较小的弹性系数
+                        {
+                            float e = min(restitution, otherRestitution);
                             float j = -(1.0f + e) * relativeVel / (1.0f / mass + 1.0f / otherMass);
 
-                            float3_custom impulse = normal * j;
-
-                            velocities[idx] = vel + impulse * (1.0f / mass);
-                            velocities[otherIdx] = otherVel - impulse * (1.0f / otherMass);
+                            velocityChange = velocityChange + normal * (j / mass);
                         }
                     }
                 }
@@ -199,6 +193,9 @@ __global__ void collisionDetectionKernel(
         }
     }
 
+    // 写入结果
+    newPositions[idx] = pos + totalCorrection;
+    newVelocities[idx] = vel + velocityChange;
     collisionFlags[idx] = collisionCount;
 }
 
@@ -215,7 +212,6 @@ CollisionDetector::CollisionDetector(
     grid.worldMin = worldMin;
     grid.worldMax = worldMax;
 
-    // 计算网格维度
     float3_custom worldSize = worldMax - worldMin;
     grid.gridDim.x = (int)ceilf(worldSize.x / cellSize);
     grid.gridDim.y = (int)ceilf(worldSize.y / cellSize);
@@ -237,11 +233,25 @@ CollisionDetector::~CollisionDetector()
 
 void CollisionDetector::allocateMemory()
 {
-    cudaMalloc(&grid.particleHashes, grid.maxParticles * sizeof(uint32_t));
-    cudaMalloc(&grid.particleIndices, grid.maxParticles * sizeof(uint32_t));
-    cudaMalloc(&grid.cellStarts, grid.totalCells * sizeof(uint32_t));
-    cudaMalloc(&grid.cellEnds, grid.totalCells * sizeof(uint32_t));
-    cudaMalloc(&d_collisionFlags, grid.maxParticles * sizeof(int));
+    size_t particleMemory = grid.maxParticles * sizeof(uint32_t) * 2;
+    size_t gridMemory = grid.totalCells * sizeof(uint32_t) * 2;
+    size_t tempMemory = grid.maxParticles * (sizeof(float3_custom) * 2 + sizeof(int));
+
+    printf("Allocating GPU memory:\n");
+    printf("  Particle hashing: %.2f MB\n", particleMemory / 1e6);
+    printf("  Grid cells: %.2f MB\n", gridMemory / 1e6);
+    printf("  Temporary buffers: %.2f MB\n", tempMemory / 1e6);
+    printf("  Total: %.2f MB\n", (particleMemory + gridMemory + tempMemory) / 1e6);
+
+    CUDA_CHECK(cudaMalloc(&grid.particleHashes, grid.maxParticles * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc(&grid.particleIndices, grid.maxParticles * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc(&grid.cellStarts, grid.totalCells * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc(&grid.cellEnds, grid.totalCells * sizeof(uint32_t)));
+    CUDA_CHECK(cudaMalloc(&d_collisionFlags, grid.maxParticles * sizeof(int)));
+    CUDA_CHECK(cudaMalloc(&d_newPositions, grid.maxParticles * sizeof(float3_custom)));
+    CUDA_CHECK(cudaMalloc(&d_newVelocities, grid.maxParticles * sizeof(float3_custom)));
+
+    printf("GPU memory allocation successful!\n\n");
 }
 
 void CollisionDetector::freeMemory()
@@ -251,6 +261,8 @@ void CollisionDetector::freeMemory()
     cudaFree(grid.cellStarts);
     cudaFree(grid.cellEnds);
     cudaFree(d_collisionFlags);
+    cudaFree(d_newPositions);
+    cudaFree(d_newVelocities);
 }
 
 void CollisionDetector::updateGrid(const ParticleSystem &particles)
@@ -262,32 +274,31 @@ void CollisionDetector::updateGrid(const ParticleSystem &particles)
 
     int numBlocks = (particles.count + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
-    // 步骤1: 计算哈希值
     computeHashKernel<<<numBlocks, BLOCK_SIZE>>>(
         particles.positions,
         grid.particleHashes,
         grid.particleIndices,
         particles.count,
         grid);
+    CUDA_CHECK_LAST_ERROR();
 
-    // 步骤2: 排序
     thrust::device_ptr<uint32_t> hashPtr(grid.particleHashes);
     thrust::device_ptr<uint32_t> indexPtr(grid.particleIndices);
     thrust::sort_by_key(hashPtr, hashPtr + particles.count, indexPtr);
 
-    // 步骤3: 重置网格
     int gridBlocks = (grid.totalCells + BLOCK_SIZE - 1) / BLOCK_SIZE;
     resetGridKernel<<<gridBlocks, BLOCK_SIZE>>>(
         grid.cellStarts,
         grid.cellEnds,
         grid.totalCells);
+    CUDA_CHECK_LAST_ERROR();
 
-    // 步骤4: 构建网格索引
     buildGridKernel<<<numBlocks, BLOCK_SIZE>>>(
         grid.particleHashes,
         grid.cellStarts,
         grid.cellEnds,
         particles.count);
+    CUDA_CHECK_LAST_ERROR();
 
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
@@ -306,10 +317,11 @@ void CollisionDetector::detectAndResolveCollisions(ParticleSystem &particles, fl
 
     int numBlocks = (particles.count + BLOCK_SIZE - 1) / BLOCK_SIZE;
 
-    // 执行碰撞检测和响应
     collisionDetectionKernel<<<numBlocks, BLOCK_SIZE>>>(
         particles.positions,
+        d_newPositions,
         particles.velocities,
+        d_newVelocities,
         particles.radii,
         particles.masses,
         particles.restitutions,
@@ -320,6 +332,14 @@ void CollisionDetector::detectAndResolveCollisions(ParticleSystem &particles, fl
         d_collisionFlags,
         particles.count,
         grid);
+    CUDA_CHECK_LAST_ERROR();
+
+    CUDA_CHECK(cudaMemcpy(particles.positions, d_newPositions,
+                          particles.count * sizeof(float3_custom),
+                          cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpy(particles.velocities, d_newVelocities,
+                          particles.count * sizeof(float3_custom),
+                          cudaMemcpyDeviceToDevice));
 
     cudaEventRecord(stop);
     cudaEventSynchronize(stop);
@@ -327,13 +347,16 @@ void CollisionDetector::detectAndResolveCollisions(ParticleSystem &particles, fl
 
     // 统计碰撞次数
     int *h_collisionFlags = new int[particles.count];
-    cudaMemcpy(h_collisionFlags, d_collisionFlags, particles.count * sizeof(int), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(h_collisionFlags, d_collisionFlags,
+                          particles.count * sizeof(int), cudaMemcpyDeviceToHost));
 
     stats.collisionCount = 0;
     for (int i = 0; i < particles.count; i++)
     {
         stats.collisionCount += h_collisionFlags[i];
     }
+    // 因为现在每对碰撞被计算两次，所以除以2
+    stats.collisionCount /= 2;
 
     delete[] h_collisionFlags;
 

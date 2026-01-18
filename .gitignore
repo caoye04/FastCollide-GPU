@@ -8,3 +8,5 @@ build/
 dist/
 out/
 .vs/
+output/
+venv/
