@@ -12,7 +12,7 @@ __global__ void initRandKernel(curandState *states, unsigned long seed, int n)
     curand_init(seed, idx, 0, &states[idx]);
 }
 
-// 随机初始化粒子（修改：Z轴为高度）
+// 随机初始化粒子 - 扩大参数差异范围
 __global__ void initParticlesKernel(
     float3_custom *positions,
     float3_custom *velocities,
@@ -30,28 +30,29 @@ __global__ void initParticlesKernel(
 
     curandState localState = randStates[idx];
 
-    // 随机位置（Z轴为高度）
+    // 随机位置（Z轴为高度，分布更广）
     float x = worldMin.x + curand_uniform(&localState) * (worldMax.x - worldMin.x);
     float y = worldMin.y + curand_uniform(&localState) * (worldMax.y - worldMin.y);
-    float z = worldMin.z + 0.3f * (worldMax.z - worldMin.z) +
-              curand_uniform(&localState) * 0.6f * (worldMax.z - worldMin.z);
+    float z = worldMin.z + 0.2f * (worldMax.z - worldMin.z) +
+              curand_uniform(&localState) * 0.7f * (worldMax.z - worldMin.z);
     positions[idx] = float3_custom(x, y, z);
 
-    // 随机速度
-    float vx = (curand_uniform(&localState) - 0.5f) * 5.0f;
-    float vy = (curand_uniform(&localState) - 0.5f) * 5.0f;
-    float vz = curand_uniform(&localState) * 2.0f; // Z方向向上的初速度
+    // ✅ 更大范围的随机速度（-8 到 +8）
+    float vx = (curand_uniform(&localState) - 0.5f) * 16.0f;
+    float vy = (curand_uniform(&localState) - 0.5f) * 16.0f;
+    float vz = curand_uniform(&localState) * 8.0f; // Z方向向上的初速度
     velocities[idx] = float3_custom(vx, vy, vz);
 
-    // 随机半径 (0.1 到 0.3)
-    radii[idx] = 0.1f + curand_uniform(&localState) * 0.2f;
+    // ✅ 更大范围的随机半径 (0.05 到 0.4)
+    radii[idx] = 0.05f + curand_uniform(&localState) * 0.35f;
 
-    // 质量与半径立方成正比
+    // ✅ 质量与半径立方成正比，但密度也随机变化（500-1500 kg/m³）
     float r = radii[idx];
-    masses[idx] = 4.0f / 3.0f * 3.14159f * r * r * r * 1000.0f;
+    float density = 500.0f + curand_uniform(&localState) * 1000.0f;
+    masses[idx] = 4.0f / 3.0f * 3.14159f * r * r * r * density;
 
-    // 随机弹性系数 (0.5 到 0.95)
-    restitutions[idx] = 0.5f + curand_uniform(&localState) * 0.45f;
+    // ✅ 更大范围的随机弹性系数 (0.3 到 0.95)
+    restitutions[idx] = 0.3f + curand_uniform(&localState) * 0.65f;
 
     randStates[idx] = localState;
 }
@@ -86,7 +87,7 @@ __global__ void integrateKernel(
     velocities[idx] = vel;
 }
 
-// 处理边界碰撞（修改：Z轴为高度）
+// 处理边界碰撞
 __global__ void boundaryCollisionKernel(
     float3_custom *positions,
     float3_custom *velocities,
@@ -130,13 +131,13 @@ __global__ void boundaryCollisionKernel(
         vel.y = -vel.y * restitution;
     }
 
-    // Z边界（修改：Z为高度，地面在Z=worldMin.z）
+    // Z边界（地面和天花板）
     if (pos.z - radius < worldMin.z)
     {
         pos.z = worldMin.z + radius;
         vel.z = -vel.z * groundRestitution;
-        vel.x *= 0.98f; // 地面摩擦
-        vel.y *= 0.98f;
+        vel.x *= 0.95f; // 地面摩擦
+        vel.y *= 0.95f;
     }
     if (pos.z + radius > worldMax.z)
     {
@@ -204,7 +205,11 @@ void PhysicsSimulator::initializeParticles(ParticleSystem &particles, int count)
     CUDA_CHECK_LAST_ERROR();
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    printf("Initialized %d particles (Z-axis UP coordinate system)\n", count);
+    printf("✓ Initialized %d particles with diverse properties:\n", count);
+    printf("  - Radius range: 0.05 - 0.40\n");
+    printf("  - Mass range: varied by radius³ × density\n");
+    printf("  - Velocity range: -8 to +8 (XY), 0 to +8 (Z)\n");
+    printf("  - Restitution range: 0.3 - 0.95\n");
 }
 
 void PhysicsSimulator::integrate(ParticleSystem &particles, float dt)
